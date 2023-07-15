@@ -1,11 +1,377 @@
 ---
 title: "CPX-351 in STM-only AML"
+---ry()
 ---
 
-## Quarto
+# Introduction
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+# Results
 
 ```{r}
-1 + 1
+library(tidyverse)
+library(survival)
+library(survminer)
+```
+
+```{r}
+cohort_data <- read_delim("CPX351_AML_MRc_20230711_SW.csv", delim = ";")
+```
+
+```{r}
+cohort_data %>% 
+  mutate(across(.cols = c(Kohorte, TRIALID, SEX, ECOG, ECOGCAT, FEV, EXAML, AMLSTAT, FAB, WHO,CGNK, CGCX, CGSTUD, CGELN, ELNRisk, IT1RES, PTF, CR1, ED30,  ED60, ALSCTCR1, ALSCTSLV, ALSCTOTH, DONOR, HLAMATCH, OSSTAT, EFSSTAT, RFSSTAT, R1, R2, R3, TRT, TRTIND, AML_MR, AGEGR,DoubleInduction, blast20), ~ as.factor(.))) %>% 
+  mutate(across(.cols = c(ASXL1:CDKN2A, CEBPA.bZIP, CSF3R:FBXW7, GATA1:IDH1, IDH2, IKZF1:NOTCH1, NRAS:`t8.21`), ~ ifelse(. == 1, "mut", "wt"))) %>% 
+  mutate(across(.cols = c(CEBPA, FLT3I, FLT3T, NPM1, CEBPADM), ~ ifelse(. == "Y", "mut", "wt"))) %>% 
+  mutate(across(.cols = c(ASXL1:FLT3T, GATA1:IDH1, IDH2, IKZF1:`t8.21`), ~ as.factor(.))) %>% 
+  mutate(across(.cols = c(WBC, PLT, PBB, CD34, OSTM, EFSTM, RFSTM, IDH1.VAF, IDH2.VAF), ~ as.numeric(.))) %>% 
+  mutate(ALSCTANY = ifelse(ALSCTCR1 == "Y"| ALSCTSLV == "Y" | ALSCTOTH == "Y", "Y", "N")) -> cohort
+
+# stm genes per WHO + RUNX1 for ICC
+stm_genes <- c("ASXL1", "BCOR", "EZH2", "SF3B1", "SRSF2", "STAG2", "U2AF1", "ZRSR2")
+stm_genes_runx1 <- c("ASXL1", "BCOR", "EZH2", "SF3B1", "SRSF2", "STAG2", "U2AF1", "ZRSR2", "RUNX1")
+
+#all_mol c(ASXL1:CEBPA.bZIP, CSF3R:FLT3T, GATA1:IDH1, IDH2, IKZF1:t8.21)
+
+# minimal data set 
+min_dat <- c("SUBJID", "Kohorte", "TRIALID", "AMLSTAT", "WHO", "CGKT", "CGCX", "CGNK", "ELNRisk", stm_genes)
+
+cohort %>% 
+  mutate(STM_WHO = if_any(.cols = stm_genes, ~ . == "mut" & !is.na(.)),
+         STM_ICC = if_any(.cols = stm_genes_runx1, ~ . == "mut" & !is.na(.))) -> cohort
+```
+
+## Cohort description
+
+## Table 1
+
+```{r}
+vars <- c("TRIALID", "Kohorte", "SEX", "AGE", "AMLSTAT", "ELNRisk", "CR1", "ALSCTCR1", "AML_MR", "TRTIND", "STM_WHO", "STM_ICC" , "CGCX", "CGNK")
+
+tableone::CreateTableOne(vars = vars, data = cohort) %>% 
+  tableone::kableone() 
+```
+
+### Note 1 - patients not classified as AML-MR
+
+```{r}
+cohort %>% 
+  filter(AML_MR == 0)
+```
+
+4 patients have RUNX1::RUNX1T1 or CBFB::MYH11 which classifies them. We can identified them via favorable risk
+
+```{r}
+cohort %>% 
+  filter(AML_MR == 0 & CGELN == "fav") %>% 
+  pull(SUBJID) -> remove_pat
+```
+
+and then there are a few left-overs with favorable risk
+
+```{r}
+cohort %>% 
+  filter(ELNRisk == "fav")
+
+# 072-022-527 is intermediate
+# the other AML-MRCs are NPM1mut but nevertheless recieved CPX-351-based induction
+cohort[cohort$SUBJID == "072-022-527",]$ELNRisk <- "int"
+```
+
+```{r}
+cohort %>% 
+  filter(AML_MR == 0 & (!SUBJID %in% remove_pat)) %>% 
+  dplyr::select(min_dat)  %>% 
+  pull(SUBJID) -> correct_pts
+```
+
+all other non-AML-MR classified have RUNX1 and are thus corrected to AML_MR = 1
+
+```{r}
+cohort[cohort$SUBJID %in% correct_pts, ]$AML_MR <- as.factor(1)
+```
+
+### Note 2 - tAML
+
+We remove any tAML patients b/c they probably have a very different disease biology
+
+```{r}
+cohort %>% 
+  filter(AMLSTAT == "tAML") %>% 
+  pull(SUBJID) %>% 
+  c(remove_pat) -> remove_pat
+```
+
+```{r}
+cohort %>% 
+  filter(!SUBJID %in% remove_pat) -> cohort
+
+cohort %>% 
+  filter(TRIALID != "AML60") -> cohort 
+```
+
+## Impact of TRIALID
+
+```{r}
+ggsurvplot(survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ TRIALID, cohort))
+```
+
+There is a significant difference in OS between different trials.
+
+All CPX-351 patients come from the AML register while the STM-AML-MR split between older trials. The AML2003 trial compares quite favorably with the AML register data while the opposite is true for the AML96 trial. Furthermore, the AML96 only includes patients above the age 60 b/c only they received a DA-based induction therapy.
+
+```{r}
+tableone::CreateTableOne(vars = vars, data = cohort, strata = "TRIALID")
+```
+
+```{r}
+ggsurvplot(survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ TRIALID, cohort), facet.by = "Kohorte")
+```
+
+```{r}
+ggsurvplot(survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ TRIALID, filter(cohort, Kohorte == "STM-AML-MR")), add.all = T)
+```
+
+```{r}
+survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ TRIALID, filter(cohort, Kohorte == "STM-AML-MR")) %>% 
+  surv_median()
+
+survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ 1, filter(cohort, Kohorte == "STM-AML-MR")) %>% 
+  surv_median()
+```
+
+OS in patients who have mutations in STMs without ASXL1, RUNX1 and TP53
+
+```{r}
+survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ TRIALID, filter(cohort, Kohorte == "STM-AML-MR" & 
+                                                     (ASXL1 == "wt" | is.na(ASXL1)) & 
+                                                        (RUNX1 == "wt" | is.na(RUNX1)) & 
+                                                           (TP53 == "wt" | is.na(TP53)))) %>% 
+  surv_median()
+
+survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ 1, filter(cohort, Kohorte == "STM-AML-MR" & 
+                                                     (ASXL1 == "wt" | is.na(ASXL1)) & 
+                                                        (RUNX1 == "wt" | is.na(RUNX1)) & 
+                                                           (TP53 == "wt" | is.na(TP53)))) %>% 
+  surv_median()
+
+survfit(Surv(RFSTM, as.numeric(RFSSTAT)) ~ TRIALID, filter(cohort, Kohorte == "STM-AML-MR" & 
+                                                     (ASXL1 == "wt" | is.na(ASXL1)) & 
+                                                        (RUNX1 == "wt" | is.na(RUNX1)) & 
+                                                           (TP53 == "wt" | is.na(TP53)))) %>% 
+  surv_median()
+
+survfit(Surv(RFSTM, as.numeric(RFSSTAT)) ~ 1, filter(cohort, Kohorte == "STM-AML-MR" & 
+                                                     (ASXL1 == "wt" | is.na(ASXL1)) & 
+                                                        (RUNX1 == "wt" | is.na(RUNX1)) & 
+                                                           (TP53 == "wt" | is.na(TP53)))) %>% 
+  surv_median()
+```
+
+```{r}
+survfit(Surv(RFSTM, as.numeric(RFSSTAT)) ~ TRIALID, filter(cohort, Kohorte == "STM-AML-MR")) %>% 
+  surv_median()
+
+survfit(Surv(RFSTM, as.numeric(RFSSTAT)) ~ 1, filter(cohort, Kohorte == "STM-AML-MR")) %>% 
+  surv_median()
+```
+
+## STM-only-AML-MR vs AML-MRC Table 1
+
+```{r}
+
+tableone::CreateTableOne(vars = vars, strata = "Kohorte", data = cohort)
+```
+
+```{r}
+filter(cohort, t8.21 == "mut" | inv16_t16.16 == "mut") %>% 
+  pull(SUBJID) %>% 
+  c(remove_pat) -> remove_pat
+```
+
+```{r}
+filter(cohort, Kohorte == "STM-AML-MR" & CGCX == "Y") %>% 
+  pull(SUBJID) %>% 
+  c(remove_pat) -> remove_pat
+```
+
+```{r}
+# 03-1-179 with BCR::ABL1-fusion
+remove_pat <- c(remove_pat, "03-1-179")
+# 17-1-002 with isochromosome 17q
+remove_pat <- c(remove_pat, "17-1-002")
+# 007-001-115 with t(4;11) KMT2A/AFF1
+remove_pat <- c(remove_pat, "007-001-115")
+# 010-006-300 with t(11;19) KMT2A/ELL
+remove_pat <- c(remove_pat, "010-006-300")
+# 016-008-346 with t(11;19) KMT2A/ELL
+remove_pat <- c(remove_pat, "016-008-346")
+
+cohort %>% 
+  filter(!SUBJID %in% remove_pat) -> cohort
+```
+
+Remove all sAML from the STM-AML-MR cohort b/c they would have received CPX-351
+
+```{r}
+cohort %>% 
+  filter(AMLSTAT == "sAML" & Kohorte == "STM-AML-MR") %>% 
+  pull(SUBJID) %>% 
+  c(remove_pat) -> remove_pat
+
+cohort %>% 
+  filter(!SUBJID %in% remove_pat) -> cohort
+```
+
+Furthermore, all patients with NPM1 and biCEBPA or bZIP CEBPA are classified as "AML with NPM1" or "AML with CEBPA", thus we need to remove them as well.
+
+```{r}
+filter(cohort, Kohorte == "STM-AML-MR" & (NPM1 == "mut" | CEBPASTAT %in% c("double", "bZIP"))) %>% 
+  pull(SUBJID) %>% 
+  c(remove_pat) -> remove_pat
+
+filter(cohort, Kohorte == "STM-AML-MR" & CEBPA.bZIP == "mut") %>% 
+  pull(SUBJID) %>% 
+  c(remove_pat) -> remove_pat
+
+cohort %>% 
+  filter(!SUBJID %in% remove_pat) -> cohort
+
+tableone::CreateTableOne(vars = vars, data = cohort, strata = "Kohorte") 
+```
+
+## Oncoprint
+
+We can visualize the frequency of molecular aberrations via a oncoprint; because we don't know the type of aberrations, we can only differentiate between mutated and wildtype. Furthermore we remove genes that are not mutated in a single patient.
+
+```{r}
+as.matrix(dplyr::select(cohort, ASXL1:CEBPA.bZIP, CSF3R:FLT3T, GATA1:IDH1, IDH2, IKZF1:t8.21)) -> mutmat
+mutmat[mutmat == "wt"] <- ""
+mutmat <- t(mutmat)
+
+ComplexHeatmap::oncoPrint(mutmat, column_split = cohort$Kohorte, remove_empty_rows = T)
+```
+
+## STM-AML-MR vs AML-MRC outcome analysis
+
+```{r}
+survfit_os <- survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ Kohorte, cohort)
+survfit_rfs <- survfit(Surv(RFSTM, as.numeric(RFSSTAT)) ~ Kohorte, cohort)
+survfit_efs <- survfit(Surv(EFSTM, as.numeric(EFSSTAT)) ~ Kohorte, cohort)
+
+ggsurvplot_list(fit = list("OS" = survfit_os, "RFS" = survfit_rfs, "EFS" = survfit_efs), 
+                data = cohort, 
+                pval = T, 
+                risk.table = T, 
+                conf.int = T, 
+                surv.median.line = "hv", 
+                ylab = "Survival probability", 
+                legend.title = c("OS", "RFS", "EFS"), 
+                legend.labs = rep(list(c("AML-MRC", "STM-AML-MR")),3)) -> survplots1
+
+arrange_ggsurvplots(survplots1, title = "Cohort strata, all patients", ncol = 3, nrow = 1)
+```
+
+```{r}
+fisher.test(cohort$CR1, cohort$Kohorte)
+
+tableone::CreateTableOne(vars = c("CR1", "ED30", "ED60", "PTF","IT1RES", "ASCLCR1"), strata = "Kohorte", data = cohort)
+```
+
+### Competing risk analysis
+
+Cumulative incidence between competing risks (relapse mortality vs non-relapse mortality vs censored).
+
+```{r}
+comprisk <- cmprsk::cuminc(ftime = cohort$OSTM, fstatus = cohort$CISTAT, group = cohort$Kohorte, cencode = "censored")
+
+ggcompetingrisks(comprisk, conf.int = F, multiple_panels = F) +
+  ggsci::scale_color_jco() -> cumincplot1
+```
+
+Cumulative incidence between competing risk in patients with alloHSCT in first complete remission
+
+```{r}
+comprisk_alloCR1 <- cmprsk::cuminc(ftime = cohort$OSTM, fstatus = cohort$CISTAT, group = cohort$Kohorte, cencode = "censored", subset = cohort$ALSCTCR1 == "Y")
+
+ggcompetingrisks(comprisk_alloCR1, conf.int = F, multiple_panels = F) +
+  ggsci::scale_color_jco() -> cumincplot_allo
+```
+
+```{r}
+cowplot::plot_grid(cumincplot1 + theme(legend.position = "none") + labs(title = "Cumulative incidence all patients"), 
+                   cumincplot_allo + theme(legend.position = "none") + labs(title = "Cumulative incidence alloHSCT patients"),
+                   cowplot::get_legend(cumincplot1), 
+                   nrow = 2, rel_heights = c(0.9, 0.1))
+```
+
+## Elderly STM-AML-MR vs AML-MRC (\> 60)
+
+```{r}
+survfit_os <- survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ Kohorte, filter(cohort, AGE >= 60))
+survfit_rfs <- survfit(Surv(RFSTM, as.numeric(RFSSTAT)) ~ Kohorte, filter(cohort, AGE >= 60))
+survfit_efs <- survfit(Surv(EFSTM, as.numeric(EFSSTAT)) ~ Kohorte, filter(cohort, AGE >= 60))
+
+ggsurvplot_list(fit = list("OS - 60+" = survfit_os, "RFS - 60+" = survfit_rfs, "EFS - 60+" = survfit_efs), 
+                data = filter(cohort, AGE >= 60), 
+                pval = T, 
+                risk.table = T, 
+                conf.int = T, 
+                surv.median.line = "hv", 
+                ylab = "Survival probability", 
+                legend.title = c("OS", "RFS", "EFS"), 
+                legend.labs = rep(list(c("AML-MRC", "STM-AML-MR")),3)) -> survplots_elderly
+
+arrange_ggsurvplots(survplots_elderly, title = "Cohort strata, patients >60", ncol = 3, nrow = 1)
+```
+
+## 
+
+```{r}
+comprisk_60 <- cmprsk::cuminc(ftime = cohort$OSTM, fstatus = cohort$CISTAT, group = cohort$Kohorte, cencode = "censored", subset = cohort$AGE >= 60)
+
+ggcompetingrisks(comprisk_60, conf.int = F, multiple_panels = F)
+
+
+comprisk_60_allo <- cmprsk::cuminc(ftime = cohort$OSTM, fstatus = cohort$CISTAT, group = cohort$Kohorte, cencode = "censored", subset = cohort$AGE >= 60 & cohort$ALSCTCR1 == "Y")
+
+ggcompetingrisks(comprisk_60_allo, conf.int = F, multiple_panels = F)
+
+```
+
+```{r}
+ggsurvplot(survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ Kohorte, filter(cohort)), pval = T, risk.table = T, conf.int = T, surv.median.line = "hv", ylab = "Overall survival probability")
+
+### !!!!
+ggsurvplot(survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ Kohorte, filter(cohort, AGE >= 60)), pval = T, risk.table = T, conf.int = T, surv.median.line = "hv", ylab = "Overall survival probability")
+
+
+ggsurvplot(survfit(Surv(OSTM, as.numeric(OSSTAT)) ~ Kohorte, filter(cohort, ALSCTCR1 == "Y" & TRIALID != "AML96")), pval = T, risk.table = T, conf.int = T, surv.median.line = "hv", ylab = "Overall survival probability - transplant patients only")
+
+
+ggsurvplot(survfit(Surv(RFSTM, as.numeric(RFSSTAT)) ~ Kohorte, cohort), pval = T, risk.table = T, conf.int = T, surv.median.line = "hv", ylab = "Relapse-free survival probability")
+
+
+ggsurvplot(survfit(Surv(EFSTM, as.numeric(EFSSTAT)) ~ Kohorte, filter(cohort)), pval = T, risk.table = T, conf.int = T, surv.median.line = "hv", ylab = "Event-free survival probability")
+
+
+ggsurvplot(survfit(Surv(EFSTM, as.numeric(EFSSTAT)) ~ Kohorte, filter(cohort, ALSCTCR1 == "Y")), pval = T, risk.table = T, conf.int = T, surv.median.line = "hv", ylab = "Event-free survival probability - transplant patients only")
+
+
+ggsurvplot(survfit(Surv(EFSTM, as.numeric(EFSSTAT)) ~ TRIALID, cohort), pval = T, risk.table = T, conf.int = T, surv.median.line = "hv", ylab = "Event-free survival probability - transplant patients only")
+
+
+tableone::CreateTableOne(vars = c("CR1", "ALSCTCR1", "ALSCTSLV", "ALSCTOTH", "ALSCTANY", "ELNRisk"), strata = "Kohorte", data = cohort)
+
+tableone::CreateTableOne(vars = c("CR1", "ALSCTCR1", "ALSCTSLV", "ALSCTOTH", "ALSCTANY", "ELNRisk"), strata = "Kohorte", data = filter(cohort, ELNRisk == "adv"))
+
+```
+
+# Summary
+
+# Session Info
+
+Last rendered `r Sys.Date()`
+
+```{r}
+
 ```
